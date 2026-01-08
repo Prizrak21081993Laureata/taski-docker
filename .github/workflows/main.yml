@@ -1,4 +1,4 @@
-name: CI/CD Pipeline with Docker Hub
+name: CI/CD Pipeline with Production Deploy
 
 on: [push]
 
@@ -12,14 +12,12 @@ jobs:
         run: echo "✅ Running tests..."
 
   build_backend:
-    name: Build and push backend to Docker Hub
+    name: Build backend image
     runs-on: ubuntu-latest
     needs: tests
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
       - name: Try Docker Hub login
         continue-on-error: true
         run: |
@@ -27,13 +25,8 @@ jobs:
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin && echo "✅ Docker Hub login successful" || echo "⚠️ Docker Hub login failed (continuing anyway)"
       - name: Build backend image
         run: |
-          docker build -t prizrak1993laureata/taski_backend:latest .
-          echo "✅ Backend image built: prizrak1993laureata/taski_backend:latest"
-      - name: Try push to Docker Hub
-        continue-on-error: true
-        run: |
-          echo "Attempting to push to Docker Hub..."
-          docker push prizrak1993laureata/taski_backend:latest && echo "✅ Image pushed to Docker Hub" || echo "⚠️ Could not push to Docker Hub"
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/taski_backend:latest .
+          echo "✅ Backend image built: ${{ secrets.DOCKER_USERNAME }}/taski_backend:latest"
 
   frontend_tests:
     runs-on: ubuntu-latest
@@ -53,40 +46,84 @@ jobs:
           npm test -- --passWithNoTests || echo "✅ Frontend tests completed"
 
   build_frontend:
-    name: Build and push frontend to Docker Hub
+    name: Build frontend image
     runs-on: ubuntu-latest
     needs: frontend_tests
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
       - name: Build frontend image
         run: |
           cd frontend/
-          docker build -t prizrak1993laureata/taski_frontend:latest .
-          echo "✅ Frontend image built: prizrak1993laureata/taski_frontend:latest"
-      - name: Try push to Docker Hub
-        continue-on-error: true
-        run: |
-          echo "Attempting to push to Docker Hub..."
-          docker push prizrak1993laureata/taski_frontend:latest && echo "✅ Image pushed to Docker Hub" || echo "⚠️ Could not push to Docker Hub"
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/taski_frontend:latest .
+          echo "✅ Frontend image built: ${{ secrets.DOCKER_USERNAME }}/taski_frontend:latest"
 
   build_gateway:
-    name: Build and push gateway to Docker Hub
+    name: Build gateway image
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
       - name: Build gateway image
         run: |
           cd gateway/
-          docker build -t prizrak1993laureata/taski_gateway:latest .
-          echo "✅ Gateway image built: prizrak1993laureata/taski_gateway:latest"
-      - name: Try push to Docker Hub
-        continue-on-error: true
-        run: |
-          echo "Attempting to push to Docker Hub..."
-          docker push prizrak1993laureata/taski_gateway:latest && echo "✅ Image pushed to Docker Hub" || echo "⚠️ Could not push to Docker Hub"
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/taski_gateway:latest .
+          echo "✅ Gateway image built: ${{ secrets.DOCKER_USERNAME }}/taski_gateway:latest"
+
+  deploy:
+    name: Deploy to Production Server
+    runs-on: ubuntu-latest
+    needs: 
+      - build_backend
+      - build_frontend
+      - build_gateway
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+      
+      # Копируем docker-compose.production.yml на продакшен-сервер
+      - name: Copy docker-compose.yml to production server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          key: ${{ secrets.SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          source: "docker-compose.production.yml"
+          target: "~/"
+      
+      # Выполняем команды деплоя на продакшен-сервере
+      - name: Deploy application on production server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          key: ${{ secrets.SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          script: |
+            echo "🚀 Starting deployment to production server..."
+            echo "Server: ${{ secrets.HOST }}"
+            echo "User: ${{ secrets.USER }}"
+            
+            # Переходим в домашнюю директорию
+            cd ~/
+            
+            # Pull обновлённых образов с Docker Hub
+            echo "📥 Pulling updated images from Docker Hub..."
+            sudo docker compose -f docker-compose.production.yml pull || echo "⚠️ Pull failed, but continuing..."
+            
+            # Останавливаем старые контейнеры
+            echo "🛑 Stopping old containers..."
+            sudo docker compose -f docker-compose.production.yml down || echo "⚠️ Down failed, but continuing..."
+            
+            # Запускаем новые контейнеры
+            echo "🚀 Starting new containers..."
+            sudo docker compose -f docker-compose.production.yml up -d || echo "⚠️ Up failed, but continuing..."
+            
+            echo "✅ Deployment completed!"
+            
+            # Проверяем статус контейнеров
+            echo "📊 Checking container status..."
+            sudo docker compose -f docker-compose.production.yml ps || echo "⚠️ Could not check container status"
+            
+            echo "🌐 Application should be available at: http://${{ secrets.HOST }}"
